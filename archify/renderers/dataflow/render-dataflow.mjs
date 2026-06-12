@@ -1,20 +1,31 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { esc, renderDefinitions, renderCards, applyTemplate } from '../shared/utils.mjs';
-import { validateSchema } from '../shared/validator.mjs';
+import { esc, renderDefinitions, textUnits } from '../shared/utils.mjs';
+import { loadDiagram, writeDiagram, svgRootAttrs } from '../shared/cli.mjs';
+import {
+  asArray,
+  isFinitePoint,
+  rectsOverlap,
+  anchor,
+  defaultFromSide,
+  defaultToSide,
+  chosenSide,
+  polylinePath,
+  labelPoint,
+  componentFill,
+  componentText,
+  arrowClassMap,
+  variantAccent
+} from '../shared/geometry.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const skillRoot = path.resolve(__dirname, '../..');
-const inputPath = path.resolve(process.argv[2] || path.join(skillRoot, 'examples/product-analytics.dataflow.json'));
-const dataflow = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
-validateSchema('dataflow', dataflow);
+const { diagram: dataflow, template, outPath } = loadDiagram({
+  rendererDir: __dirname,
+  diagramType: 'dataflow',
+  defaultExample: 'product-analytics.dataflow.json'
+});
 
-const templatePath = path.join(skillRoot, 'assets/template.html');
-const template = fs.readFileSync(templatePath, 'utf8');
-const outPath = path.resolve(process.cwd(), process.argv[3] || dataflow.meta.output || 'dataflow.html');
-
-const viewBox = dataflow.meta.viewBox || [940, 720];
+const viewBox = dataflow.meta?.viewBox || [940, 720];
 const layout = {
   stageY: 46,
   stageH: 36,
@@ -26,33 +37,6 @@ const layout = {
   nodeH: 58,
   rowYs: [128, 242, 356, 470, 584],
   labelH: 16
-};
-
-const typeClass = {
-  frontend: 'c-frontend',
-  backend: 'c-backend',
-  database: 'c-database',
-  cloud: 'c-cloud',
-  security: 'c-security',
-  messagebus: 'c-messagebus',
-  external: 'c-external'
-};
-
-const textClass = {
-  frontend: 't-frontend',
-  backend: 't-backend',
-  database: 't-database',
-  cloud: 't-cloud',
-  security: 't-security',
-  messagebus: 't-messagebus',
-  external: 't-external'
-};
-
-const arrowClass = {
-  default: ['a-default', 'arrowhead'],
-  emphasis: ['a-emphasis', 'arrowhead-emphasis'],
-  security: ['a-security', 'arrowhead-security'],
-  dashed: ['a-dashed', 'arrowhead-dashed']
 };
 
 function stageX(index) {
@@ -75,16 +59,7 @@ function measureNode(node) {
   };
 }
 
-const nodes = new Map((dataflow.nodes || []).map((node) => [node.id, measureNode(node)]));
-
-function rectsOverlap(a, b, gap = 0) {
-  return !(
-    a.x + a.width + gap <= b.x ||
-    b.x + b.width + gap <= a.x ||
-    a.y + a.height + gap <= b.y ||
-    b.y + b.height + gap <= a.y
-  );
-}
+const nodes = new Map(asArray(dataflow.nodes).map((node) => [node.id, measureNode(node)]));
 
 function validateDataflow() {
   const problems = [];
@@ -98,34 +73,45 @@ function validateDataflow() {
     problems.push('Data-flow diagrams need at least two nodes.');
   }
   if (!Array.isArray(dataflow.flows)) problems.push('Data-flow diagrams must include a flows array.');
-  if (nodes.size !== (dataflow.nodes || []).length) problems.push('Node ids must be unique.');
+  if (dataflow.cards !== undefined && !Array.isArray(dataflow.cards)) problems.push('Data-flow "cards" must be an array.');
+  if (nodes.size !== asArray(dataflow.nodes).length) problems.push('Node ids must be unique.');
 
+  const stageCount = asArray(dataflow.stages).length;
   for (const node of nodes.values()) {
-    if (typeof node.stage !== 'number' || node.stage < 0 || node.stage >= dataflow.stages.length) {
-      problems.push(`Node "${node.id}" uses invalid stage ${node.stage}.`);
+    if (typeof node.stage !== 'number' || node.stage < 0 || node.stage >= stageCount) {
+      problems.push(`Node "${node.id}" uses invalid stage ${node.stage} — valid stages are 0..${stageCount - 1}.`);
     }
     if (typeof node.row !== 'number' || node.row < 0 || node.row >= layout.rowYs.length) {
-      problems.push(`Node "${node.id}" uses invalid row ${node.row}.`);
+      problems.push(`Node "${node.id}" uses invalid row ${node.row} — valid rows are 0..${layout.rowYs.length - 1}.`);
+    }
+    if (!isFinitePoint(node.x, node.y, node.cx, node.cy)) {
+      problems.push(`Node "${node.id}" produced non-finite coordinates — check stage, row, width, height, and yOffset are numbers.`);
+      continue;
     }
     if (node.x < 24 || node.x + node.width > viewBox[0] - 24) {
-      problems.push(`Node "${node.id}" exceeds the horizontal bounds of the viewBox.`);
+      problems.push(`Node "${node.id}" exceeds the horizontal bounds of the viewBox — reduce node.width or increase meta.viewBox[0].`);
     }
     if (node.y < layout.stageY + layout.stageH + 22 || node.y + node.height > viewBox[1] - layout.stageBottomPad) {
-      problems.push(`Node "${node.id}" exceeds the readable diagram area.`);
+      problems.push(`Node "${node.id}" exceeds the readable diagram area — keep y between ${layout.stageY + layout.stageH + 22} and ${viewBox[1] - layout.stageBottomPad} (adjust row/yOffset or increase meta.viewBox[1]).`);
+    }
+    const estLabelW = textUnits(node.label) * 6.2;
+    if (estLabelW > node.width + 6) {
+      problems.push(`Label "${node.label}" (~${Math.round(estLabelW)}px) is wider than node "${node.id}" (${node.width}px) — shorten the label, move detail to sublabel, or increase node.width.`);
     }
   }
 
-  for (let i = 0; i < dataflow.nodes.length; i += 1) {
-    for (let j = i + 1; j < dataflow.nodes.length; j += 1) {
-      const a = nodes.get(dataflow.nodes[i].id);
-      const b = nodes.get(dataflow.nodes[j].id);
+  const nodeList = asArray(dataflow.nodes);
+  for (let i = 0; i < nodeList.length; i += 1) {
+    for (let j = i + 1; j < nodeList.length; j += 1) {
+      const a = nodes.get(nodeList[i].id);
+      const b = nodes.get(nodeList[j].id);
       if (rectsOverlap(a, b, 10)) {
-        problems.push(`Nodes "${a.id}" and "${b.id}" are too close.`);
+        problems.push(`Nodes "${a.id}" and "${b.id}" are less than 10px apart — move one to another stage/row or adjust yOffset.`);
       }
     }
   }
 
-  for (const flow of dataflow.flows || []) {
+  for (const flow of asArray(dataflow.flows)) {
     if (!nodes.has(flow.from)) problems.push(`Flow "${flow.label || flow.from}" references unknown source "${flow.from}".`);
     if (!nodes.has(flow.to)) problems.push(`Flow "${flow.label || flow.to}" references unknown target "${flow.to}".`);
     if (!flow.label) problems.push(`Flow "${flow.from}" -> "${flow.to}" must include a short data label.`);
@@ -133,41 +119,42 @@ function validateDataflow() {
       const routed = pathFor(flow);
       const [start, end] = [routed.points[0], routed.points[routed.points.length - 1]];
       const distance = Math.hypot(end[0] - start[0], end[1] - start[1]);
-      if (distance < 34) problems.push(`Flow "${flow.label}" is too short to read cleanly.`);
+      if (distance < 34) problems.push(`Flow "${flow.label}" is too short (${Math.round(distance)}px; minimum 34px) — route it through a channel or spread its nodes.`);
     }
   }
 
-  const lastStageX = stageX((dataflow.stages || []).length - 1);
-  if (lastStageX + layout.stageW / 2 > viewBox[0] - 24) problems.push('Stages exceed viewBox width.');
+  const labelRects = [];
+  for (const flow of asArray(dataflow.flows)) {
+    if (!flow.label || !nodes.has(flow.from) || !nodes.has(flow.to)) continue;
+    const [lx, ly] = labelPoint(flow, pathFor(flow).points);
+    const longestLine = Math.max(textUnits(flow.label), textUnits(flow.classification || ''));
+    const width = Math.max(34, longestLine * 4.9 + 12);
+    const height = flow.classification ? 27 : layout.labelH;
+    labelRects.push({ label: flow.label, x: lx - width / 2, y: ly - 11, width, height });
+  }
+  for (const rect of labelRects) {
+    for (const node of nodes.values()) {
+      if (rectsOverlap(rect, node, -2)) {
+        problems.push(`Label "${rect.label}" overlaps node "${node.id}" — adjust labelDx/labelDy/labelSegment or set labelAt.`);
+      }
+    }
+  }
+  for (let i = 0; i < labelRects.length; i += 1) {
+    for (let j = i + 1; j < labelRects.length; j += 1) {
+      if (rectsOverlap(labelRects[i], labelRects[j], -2)) {
+        problems.push(`Labels "${labelRects[i].label}" and "${labelRects[j].label}" overlap — adjust labelDx/labelDy.`);
+      }
+    }
+  }
+
+  const lastStageX = stageX(asArray(dataflow.stages).length - 1);
+  if (lastStageX + layout.stageW / 2 > viewBox[0] - 24) {
+    problems.push(`Stages exceed viewBox width — set meta.viewBox[0] to at least ${Math.ceil(lastStageX + layout.stageW / 2 + 24)}.`);
+  }
 
   if (problems.length) {
     throw new Error(`Data-flow layout validation failed:\n- ${problems.join('\n- ')}`);
   }
-}
-
-function anchor(node, side) {
-  switch (side || 'auto') {
-    case 'left': return [node.x, node.cy];
-    case 'right': return [node.x + node.width, node.cy];
-    case 'top': return [node.cx, node.y];
-    case 'bottom': return [node.cx, node.y + node.height];
-    default:
-      return [node.x + node.width, node.cy];
-  }
-}
-
-function defaultFromSide(from, to) {
-  if (to.cx < from.cx) return 'left';
-  if (to.cx > from.cx) return 'right';
-  if (to.cy > from.cy) return 'bottom';
-  return 'top';
-}
-
-function defaultToSide(from, to) {
-  if (to.cx < from.cx) return 'right';
-  if (to.cx > from.cx) return 'left';
-  if (to.cy > from.cy) return 'top';
-  return 'bottom';
 }
 
 function routeVia(flow, from, to, start, end) {
@@ -176,15 +163,15 @@ function routeVia(flow, from, to, start, end) {
     case 'straight':
       return [];
     case 'vertical-channel': {
-      const x = flow.channelX || start[0] + (end[0] > start[0] ? 44 : -44);
+      const x = flow.channelX ?? start[0] + (end[0] > start[0] ? 44 : -44);
       return [[x, start[1]], [x, end[1]]];
     }
     case 'bottom-channel': {
-      const y = flow.channelY || Math.max(from.y + from.height, to.y + to.height) + 26;
+      const y = flow.channelY ?? Math.max(from.y + from.height, to.y + to.height) + 26;
       return [[start[0], y], [end[0], y]];
     }
     case 'top-channel': {
-      const y = flow.channelY || Math.min(from.y, to.y) - 24;
+      const y = flow.channelY ?? Math.min(from.y, to.y) - 24;
       return [[start[0], y], [end[0], y]];
     }
     case 'auto':
@@ -196,30 +183,18 @@ function routeVia(flow, from, to, start, end) {
   }
 }
 
+const pathCache = new Map();
+
 function pathFor(flow) {
+  if (pathCache.has(flow)) return pathCache.get(flow);
   const from = nodes.get(flow.from);
   const to = nodes.get(flow.to);
-  const start = anchor(from, flow.fromSide || defaultFromSide(from, to));
-  const end = anchor(to, flow.toSide || defaultToSide(from, to));
+  const start = anchor(from, chosenSide(flow.fromSide, defaultFromSide(from, to)));
+  const end = anchor(to, chosenSide(flow.toSide, defaultToSide(from, to)));
   const points = [start, ...routeVia(flow, from, to, start, end), end];
-  return {
-    d: points.map(([x, y], index) => `${index === 0 ? 'M' : 'L'} ${x} ${y}`).join(' '),
-    points
-  };
-}
-
-function labelPoint(flow, points) {
-  if (flow.labelAt) return flow.labelAt;
-  if (points.length === 2) {
-    return [
-      (points[0][0] + points[1][0]) / 2 + (flow.labelDx || 0),
-      points[0][1] - 10 + (flow.labelDy || 0)
-    ];
-  }
-  const segmentIndex = Math.min(points.length - 2, Math.max(0, flow.labelSegment ?? 1));
-  const a = points[segmentIndex];
-  const b = points[segmentIndex + 1];
-  return [(a[0] + b[0]) / 2 + (flow.labelDx || 0), (a[1] + b[1]) / 2 - 10 + (flow.labelDy || 0)];
+  const routed = { d: polylinePath(points), points };
+  pathCache.set(flow, routed);
+  return routed;
 }
 
 function renderStage(stage, index) {
@@ -231,8 +206,8 @@ function renderStage(stage, index) {
 }
 
 function renderNode(node) {
-  const fill = typeClass[node.type] || 'c-external';
-  const accent = textClass[node.type] || 't-muted';
+  const fill = componentFill[node.type] || 'c-external';
+  const accent = componentText[node.type] || 't-muted';
   const tag = node.tag
     ? `\n        <text x="${node.cx}" y="${node.y + node.height - 11}" class="${accent}" font-size="7" text-anchor="middle">${esc(node.tag)}</text>`
     : '';
@@ -242,18 +217,8 @@ function renderNode(node) {
         <text x="${node.cx}" y="${node.y + 37}" class="t-muted" font-size="7" text-anchor="middle">${esc(node.sublabel || '')}</text>${tag}`;
 }
 
-function flowAccent(flow) {
-  return flow.variant === 'security'
-    ? 't-security'
-    : flow.variant === 'emphasis'
-      ? 't-backend'
-      : flow.variant === 'dashed'
-        ? 't-messagebus'
-        : 't-muted';
-}
-
 function renderFlowPath(flow) {
-  const [cls, marker] = arrowClass[flow.variant || 'default'] || arrowClass.default;
+  const [cls, marker] = arrowClassMap[flow.variant || 'default'] || arrowClassMap.default;
   const routed = pathFor(flow);
   const strokeWidth = flow.width || (flow.variant === 'emphasis' ? 1.8 : 1.4);
   return `        <path d="${routed.d}" class="${cls}" stroke-width="${strokeWidth}" marker-end="url(#${marker})"/>`;
@@ -262,14 +227,14 @@ function renderFlowPath(flow) {
 function renderFlowLabel(flow) {
   const routed = pathFor(flow);
   const [lx, ly] = labelPoint(flow, routed.points);
-  const longestLine = Math.max(flow.label.length, (flow.classification || '').length);
+  const longestLine = Math.max(textUnits(flow.label), textUnits(flow.classification || ''));
   const labelW = Math.max(34, longestLine * 4.9 + 12);
   const classification = flow.classification
     ? `\n        <text x="${lx}" y="${ly + 11}" class="t-dim" font-size="7" text-anchor="middle">${esc(flow.classification)}</text>`
     : '';
   const labelH = flow.classification ? 27 : layout.labelH;
   return `        <rect x="${lx - labelW / 2}" y="${ly - 11}" width="${labelW}" height="${labelH}" rx="4" class="c-mask"/>
-        <text x="${lx}" y="${ly}" class="${flowAccent(flow)}" font-size="8" text-anchor="middle">${esc(flow.label)}</text>${classification}`;
+        <text x="${lx}" y="${ly}" class="${variantAccent(flow.variant)}" font-size="8" text-anchor="middle">${esc(flow.label)}</text>${classification}`;
 }
 
 function renderLegend() {
@@ -286,7 +251,7 @@ function renderLegend() {
 }
 
 function renderSvg() {
-  return `      <svg viewBox="0 0 ${viewBox[0]} ${viewBox[1]}">
+  return `      <svg viewBox="0 0 ${viewBox[0]} ${viewBox[1]}" ${svgRootAttrs(dataflow.meta, 'data-flow diagram')}>
 ${renderDefinitions()}
 
         <!-- Background Grid -->
@@ -296,13 +261,13 @@ ${renderDefinitions()}
 ${dataflow.stages.map(renderStage).join('\n\n')}
 
         <!-- Flow paths -->
-${(dataflow.flows || []).map(renderFlowPath).join('\n')}
+${asArray(dataflow.flows).map(renderFlowPath).join('\n')}
 
         <!-- Nodes -->
 ${[...nodes.values()].map(renderNode).join('\n\n')}
 
         <!-- Flow labels -->
-${(dataflow.flows || []).map(renderFlowLabel).join('\n')}
+${asArray(dataflow.flows).map(renderFlowLabel).join('\n')}
 
         <!-- Legend -->
 ${renderLegend()}
@@ -310,12 +275,11 @@ ${renderLegend()}
 }
 
 validateDataflow();
-fs.mkdirSync(path.dirname(outPath), { recursive: true });
-fs.writeFileSync(outPath, applyTemplate(template, {
-  title: dataflow.meta.title,
-  subtitle: dataflow.meta.subtitle,
-  footer: 'Data-flow diagram &bull; Built with Archify &bull; Press <kbd>T</kbd> for theme and <kbd>E</kbd> for export',
+writeDiagram({
+  outPath,
+  template,
+  meta: dataflow.meta,
+  footerLabel: 'Data-flow diagram',
   svg: renderSvg(),
-  cards: renderCards(dataflow.cards),
-}));
-console.log(outPath);
+  cards: dataflow.cards,
+});

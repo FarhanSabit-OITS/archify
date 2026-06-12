@@ -4,7 +4,14 @@
   "title": "Archify Lifecycle Diagram",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "diagram_type", "meta", "lanes", "states", "transitions"],
+  "required": [
+    "schema_version",
+    "diagram_type",
+    "meta",
+    "lanes",
+    "states",
+    "transitions"
+  ],
   "properties": {
     "schema_version": {
       "const": 1
@@ -15,16 +22,31 @@
     "meta": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["title"],
+      "required": [
+        "title"
+      ],
       "properties": {
-        "title": { "type": "string", "minLength": 1 },
-        "subtitle": { "type": "string" },
-        "output": { "type": "string" },
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "subtitle": {
+          "type": "string"
+        },
+        "output": {
+          "type": "string"
+        },
         "viewBox": {
           "type": "array",
           "prefixItems": [
-            { "type": "number", "minimum": 420 },
-            { "type": "number", "minimum": 360 }
+            {
+              "type": "number",
+              "minimum": 420
+            },
+            {
+              "type": "number",
+              "minimum": 566
+            }
           ],
           "items": false,
           "minItems": 2,
@@ -39,10 +61,18 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "label"],
+        "required": [
+          "id",
+          "label"
+        ],
         "properties": {
-          "id": { "$ref": "#/$defs/id" },
-          "label": { "type": "string", "minLength": 1 }
+          "id": {
+            "$ref": "common.schema.json#/$defs/id"
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          }
         }
       }
     },
@@ -52,21 +82,61 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "type", "label", "lane", "col"],
+        "required": [
+          "id",
+          "type",
+          "label",
+          "lane",
+          "col"
+        ],
         "properties": {
-          "id": { "$ref": "#/$defs/id" },
-          "type": {
-            "enum": ["start", "active", "waiting", "decision", "success", "failure", "neutral", "external"]
+          "id": {
+            "$ref": "common.schema.json#/$defs/id"
           },
-          "label": { "type": "string", "minLength": 1 },
-          "sublabel": { "type": "string" },
-          "tag": { "type": "string" },
-          "step": { "type": "string" },
-          "lane": { "$ref": "#/$defs/id" },
-          "col": { "type": "integer", "minimum": 0 },
-          "width": { "type": "number", "minimum": 48 },
-          "height": { "type": "number", "minimum": 36 },
-          "yOffset": { "type": "number" }
+          "type": {
+            "enum": [
+              "start",
+              "active",
+              "waiting",
+              "decision",
+              "success",
+              "failure",
+              "neutral",
+              "external"
+            ]
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sublabel": {
+            "type": "string"
+          },
+          "tag": {
+            "type": "string"
+          },
+          "step": {
+            "type": "string"
+          },
+          "lane": {
+            "$ref": "common.schema.json#/$defs/id"
+          },
+          "col": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4
+          },
+          "width": {
+            "type": "number",
+            "minimum": 48
+          },
+          "height": {
+            "type": "number",
+            "minimum": 36
+          },
+          "yOffset": {
+            "type": "number"
+          }
         }
       }
     },
@@ -75,78 +145,91 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["from", "to"],
+        "required": [
+          "from",
+          "to"
+        ],
         "properties": {
-          "from": { "$ref": "#/$defs/id" },
-          "to": { "$ref": "#/$defs/id" },
-          "label": { "type": "string" },
-          "note": { "type": "string" },
+          "from": {
+            "$ref": "common.schema.json#/$defs/id"
+          },
+          "to": {
+            "$ref": "common.schema.json#/$defs/id"
+          },
+          "label": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
           "variant": {
-            "enum": ["default", "emphasis", "security", "dashed"]
+            "$ref": "common.schema.json#/$defs/variant"
           },
           "route": {
-            "enum": ["auto", "straight", "drop", "raise", "bottom-channel", "top-channel", "right-channel", "left-channel"]
+            "enum": [
+              "auto",
+              "straight",
+              "drop",
+              "bottom-channel",
+              "top-channel",
+              "right-channel",
+              "left-channel"
+            ]
           },
           "fromSide": {
-            "enum": ["left", "right", "top", "bottom"]
+            "enum": [
+              "left",
+              "right",
+              "top",
+              "bottom"
+            ]
           },
           "toSide": {
-            "enum": ["left", "right", "top", "bottom"]
+            "enum": [
+              "left",
+              "right",
+              "top",
+              "bottom"
+            ]
           },
-          "channelX": { "type": "number" },
-          "channelY": { "type": "number" },
-          "bias": { "type": "number", "minimum": 0, "maximum": 1 },
+          "channelX": {
+            "type": "number"
+          },
+          "channelY": {
+            "type": "number"
+          },
+          "cornerRadius": {
+            "type": "number",
+            "minimum": 0
+          },
           "labelAt": {
-            "type": "array",
-            "prefixItems": [
-              { "type": "number" },
-              { "type": "number" }
-            ],
-            "items": false,
-            "minItems": 2,
-            "maxItems": 2
+            "$ref": "common.schema.json#/$defs/point"
           },
-          "labelDx": { "type": "number" },
-          "labelDy": { "type": "number" },
-          "labelSegment": { "type": "integer", "minimum": 0 },
+          "labelDx": {
+            "type": "number"
+          },
+          "labelDy": {
+            "type": "number"
+          },
+          "labelSegment": {
+            "type": "integer",
+            "minimum": 0
+          },
           "via": {
             "type": "array",
             "items": {
-              "type": "array",
-              "prefixItems": [
-                { "type": "number" },
-                { "type": "number" }
-              ],
-              "items": false,
-              "minItems": 2,
-              "maxItems": 2
+              "$ref": "common.schema.json#/$defs/point"
             }
           },
-          "width": { "type": "number", "minimum": 0.5 }
+          "width": {
+            "type": "number",
+            "minimum": 0.5
+          }
         }
       }
     },
     "cards": {
-      "type": "array",
-      "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["dot", "title", "items"],
-        "properties": {
-          "dot": { "enum": ["cyan", "emerald", "violet", "amber", "rose", "orange", "slate"] },
-          "title": { "type": "string", "minLength": 1 },
-          "items": {
-            "type": "array",
-            "items": { "type": "string" }
-          }
-        }
-      }
-    }
-  },
-  "$defs": {
-    "id": {
-      "type": "string",
-      "pattern": "^[a-zA-Z][a-zA-Z0-9_-]*$"
+      "$ref": "common.schema.json#/$defs/cards"
     }
   }
 }

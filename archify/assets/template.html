@@ -3,8 +3,36 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="generator" content="archify 2.6.0">
   <title>[PROJECT NAME] Architecture Diagram</title>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script>
+    // Resolve the theme before first paint so light-preference users don't
+    // see a dark flash. The toolbar script below re-applies with UI state.
+    (function () {
+      try {
+        var theme = null;
+        try {
+          var param = new URLSearchParams(window.location.search).get('theme');
+          if (param === 'light' || param === 'dark') theme = param;
+        } catch (_) {}
+        if (!theme) {
+          try { theme = localStorage.getItem('archify-theme'); } catch (_) {}
+        }
+        if (theme !== 'light' && theme !== 'dark') {
+          theme = window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+        }
+        document.documentElement.setAttribute('data-theme', theme);
+      } catch (_) {}
+    })();
+  </script>
+  <!-- Async font load: a blackholed network must not block first paint.
+       The body font stack falls back to system monospace until it lands. -->
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap"
+        rel="stylesheet" media="print" onload="this.media='all'">
+  <noscript>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  </noscript>
   <style>
     /* ==========================================================
        THEME VARIABLES — switch by toggling [data-theme] on <html>
@@ -16,6 +44,8 @@
       --text: #ffffff;
       --text-muted: #94a3b8;
       --text-dim: #475569;
+      /* UI chrome (menu hints, footer) needs more contrast than SVG .t-dim accents */
+      --text-faint: #7d8da1;
 
       --panel: rgba(15, 23, 42, 0.5);
       --panel-border: #1e293b;
@@ -57,6 +87,7 @@
       --text: #0f172a;
       --text-muted: #64748b;
       --text-dim: #94a3b8;
+      --text-faint: #64748b;
 
       --panel: #ffffff;
       --panel-border: #e2e8f0;
@@ -93,7 +124,7 @@
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
     body {
-      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', 'Noto Sans Mono CJK SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace;
       background: var(--bg);
       min-height: 100vh;
       padding: 2rem;
@@ -199,7 +230,7 @@
     .footer {
       text-align: center;
       margin-top: 1.5rem;
-      color: var(--text-dim);
+      color: var(--text-faint);
       font-size: 0.75rem;
     }
 
@@ -212,6 +243,9 @@
     @page { size: landscape; margin: 1.5cm; }
 
     @media print {
+      /* Force the FULL light palette — including component fills/strokes and
+         lane/arrow colors — so printing from dark theme doesn't put neon
+         strokes and translucent dark fills on white paper. */
       :root, [data-theme="dark"], [data-theme="light"] {
         --bg: #ffffff;
         --grid: transparent;
@@ -220,11 +254,30 @@
         --text: #0f172a;
         --text-muted: #475569;
         --text-dim: #94a3b8;
+        --text-faint: #64748b;
         --mask: #ffffff;
+        --lane-fill: rgba(248, 250, 252, 0.65);
+        --lane-stroke: #cbd5e1;
+        --arrow: #94a3b8;
+        --arrow-emphasis: #059669;
+        --frontend-fill:    rgba(34, 211, 238, 0.15);
+        --frontend-stroke:  #0891b2;
+        --backend-fill:     rgba(52, 211, 153, 0.18);
+        --backend-stroke:   #059669;
+        --database-fill:    rgba(167, 139, 250, 0.2);
+        --database-stroke:  #7c3aed;
+        --cloud-fill:       rgba(251, 191, 36, 0.18);
+        --cloud-stroke:     #d97706;
+        --security-fill:    rgba(251, 113, 133, 0.15);
+        --security-stroke:  #e11d48;
+        --messagebus-fill:  rgba(251, 146, 60, 0.15);
+        --messagebus-stroke:#ea580c;
+        --external-fill:    rgba(148, 163, 184, 0.18);
+        --external-stroke:  #64748b;
       }
       body { background: #ffffff !important; padding: 0; }
       .container { max-width: none; }
-      .toolbar, .archify-toast { display: none !important; }
+      .toolbar, .archify-toast, .no-print { display: none !important; }
       .diagram-container, .card { box-shadow: none; border-color: #e2e8f0; }
       .cards { grid-template-columns: 1fr 1fr; }
       /* Ensure elements break sensibly across pages */
@@ -295,7 +348,7 @@
       background: var(--toolbar-hover);
     }
     .toolbar .export-menu .hint {
-      color: var(--text-dim);
+      color: var(--text-faint);
       font-size: 0.625rem;
     }
     .toolbar .export-menu hr {
@@ -426,11 +479,11 @@
       </button>
       <div class="export-menu" id="export-menu" role="menu" aria-label="Export">
         <button data-action="copy"  type="button" role="menuitem" tabindex="-1">Copy to clipboard <span class="hint">PNG</span></button>
-        <hr role="separator" aria-hidden="true">
+        <hr role="separator">
         <button data-format="png"   type="button" role="menuitem" tabindex="-1">Download PNG</button>
         <button data-format="jpeg"  type="button" role="menuitem" tabindex="-1">Download JPEG</button>
         <button data-format="webp"  type="button" role="menuitem" tabindex="-1">Download WebP</button>
-        <hr role="separator" aria-hidden="true">
+        <hr role="separator">
         <button data-format="svg"   type="button" role="menuitem" tabindex="-1">Download SVG <span class="hint">vector</span></button>
       </div>
     </div>
@@ -449,7 +502,7 @@
     <!-- Main Diagram -->
     <div class="diagram-container">
       <!-- ARCHIFY:SVG_SLOT_START -->
-      <svg viewBox="0 0 1000 680">
+      <svg viewBox="0 0 1000 680" role="img" aria-label="[PROJECT NAME] architecture diagram">
         <!-- Definitions -->
         <defs>
           <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
@@ -660,13 +713,27 @@
       var icon = document.getElementById('theme-icon');
       var label = document.getElementById('theme-label');
 
-      function resolveInitial() {
+      // localStorage can throw (blocked cookies, sandboxed iframes); the whole
+      // script element dies on an uncaught error, so guard every access.
+      function readStored() {
+        try { return localStorage.getItem(STORAGE_KEY); } catch (_) { return null; }
+      }
+      function writeStored(value) {
+        try { localStorage.setItem(STORAGE_KEY, value); } catch (_) {}
+      }
+      function urlOverride() {
         // URL param wins (useful for deterministic screenshots / share links)
         try {
           var param = new URLSearchParams(window.location.search).get('theme');
           if (param === 'light' || param === 'dark') return param;
         } catch (_) {}
-        var saved = localStorage.getItem(STORAGE_KEY);
+        return null;
+      }
+
+      function resolveInitial() {
+        var fromUrl = urlOverride();
+        if (fromUrl) return fromUrl;
+        var saved = readStored();
         if (saved === 'light' || saved === 'dark') return saved;
         return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
       }
@@ -681,11 +748,23 @@
       function toggle() {
         var next = html.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
         apply(next);
-        localStorage.setItem(STORAGE_KEY, next);
+        writeStored(next);
       }
 
       apply(resolveInitial());
       btn.addEventListener('click', toggle);
+
+      // Follow live OS theme changes while the user has no explicit preference.
+      try {
+        var media = window.matchMedia('(prefers-color-scheme: light)');
+        var onChange = function (e) {
+          var saved = readStored();
+          if (urlOverride() || saved === 'light' || saved === 'dark') return;
+          apply(e.matches ? 'light' : 'dark');
+        };
+        if (media.addEventListener) media.addEventListener('change', onChange);
+        else if (media.addListener) media.addListener(onChange);
+      } catch (_) {}
 
       return { toggle: toggle };
     })();
@@ -706,7 +785,10 @@
       var RASTER_SCALE = 4;
 
       function diagramFilename() {
-        var title = (document.title || 'diagram').replace(/\s+Architecture(\s+Diagram)?$/i, '').trim();
+        var title = (document.title || 'diagram')
+          .replace(/\s+Architecture(\s+Diagram)?$/i, '')
+          .replace(/\s+Diagram$/i, '')
+          .trim();
         return title.replace(/[^a-z0-9_\-]+/gi, '-')
                     .toLowerCase()
                     .replace(/^-+|-+$/g, '') || 'diagram';
@@ -749,21 +831,37 @@
         clone.setAttribute('height', vb.height * scale);
         clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
 
-        var hostStyle = Array.prototype.map.call(document.querySelectorAll('style'), function (s) {
-          return s.textContent;
-        }).join('\n');
+        // Only the SVG-relevant rules: semantic classes, markers, and the
+        // theme variable blocks. Toolbar/cards/print CSS can never apply
+        // inside a standalone SVG and would only bloat the export.
+        var hostStyle = (function () {
+          var out = [];
+          Array.prototype.forEach.call(document.styleSheets, function (sheet) {
+            var rules;
+            try { rules = sheet.cssRules; } catch (_) { return; } // cross-origin
+            if (!rules) return;
+            Array.prototype.forEach.call(rules, function (rule) {
+              if (rule.type !== 1) return; // plain style rules only
+              var sel = rule.selectorText || '';
+              if (/(^|,)\s*(svg|:root|\[data-theme|\.c-|\.t-|\.a-|\.m-)/.test(sel)) {
+                out.push(rule.cssText);
+              }
+            });
+          });
+          return out.join('\n');
+        })();
 
-        var varNames = [
-          '--bg','--grid','--text','--text-muted','--text-dim',
-          '--arrow','--arrow-emphasis','--mask',
-          '--frontend-fill','--frontend-stroke',
-          '--backend-fill','--backend-stroke',
-          '--database-fill','--database-stroke',
-          '--cloud-fill','--cloud-stroke',
-          '--security-fill','--security-stroke',
-          '--messagebus-fill','--messagebus-stroke',
-          '--external-fill','--external-stroke'
-        ];
+        // Derive the variable list from the stylesheet so newly added theme
+        // variables can never be missed by the export pipeline again
+        // (--lane-fill/--lane-stroke once were).
+        var varNames = (function () {
+          var seen = {};
+          var names = [];
+          (hostStyle.match(/--[a-zA-Z0-9-]+(?=\s*:)/g) || []).forEach(function (n) {
+            if (!seen[n]) { seen[n] = true; names.push(n); }
+          });
+          return names;
+        })();
 
         // Resolve the full variable set for a given data-theme via an
         // off-DOM probe, independent of what the viewer is currently set to.
@@ -808,7 +906,7 @@
 
           style.textContent =
             fontFallback + "\n" +
-            "svg { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }\n" +
+            "svg { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', 'Noto Sans Mono CJK SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace; }\n" +
             hostStyle + "\n" +
             ":root, svg { " + darkVars + " }\n" +
             "@media (prefers-color-scheme: light) { :root, svg { " + lightVars + " } }\n" +
@@ -836,7 +934,7 @@
           // Keep this order.
           style.textContent =
             fontFallback + "\n" +
-            "svg { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace; }\n" +
+            "svg { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', 'Noto Sans Mono CJK SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace; }\n" +
             hostStyle + "\n" +
             ":root, svg { " + vars + " }\n";
 
@@ -961,23 +1059,30 @@
       });
 
       // ---- Toast ----------------------------------------------------------
+      // A live region only announces CHANGES to an existing node, so the toast
+      // element is created once up front and updated in place.
+      var toastEl = document.createElement('div');
+      toastEl.className = 'archify-toast';
+      toastEl.setAttribute('role', 'status');
+      document.body.appendChild(toastEl);
+      var toastTimer = null;
+
       function toast(msg) {
-        var t = document.createElement('div');
-        t.className = 'archify-toast';
-        t.textContent = msg;
-        document.body.appendChild(t);
-        requestAnimationFrame(function () { t.classList.add('show'); });
-        setTimeout(function () {
-          t.classList.remove('show');
-          setTimeout(function () { t.remove(); }, 300);
-        }, 1500);
+        toastEl.textContent = '';
+        requestAnimationFrame(function () {
+          toastEl.textContent = msg;
+          toastEl.classList.add('show');
+        });
+        clearTimeout(toastTimer);
+        toastTimer = setTimeout(function () { toastEl.classList.remove('show'); }, 1500);
       }
 
-      function open() {
+      function open(focusLast) {
         menu.classList.add('open');
         btn.setAttribute('aria-expanded', 'true');
-        var first = items().filter(function (i) { return !i.disabled; })[0];
-        if (first) first.focus();
+        var available = items().filter(function (i) { return !i.disabled; });
+        var target = focusLast ? available[available.length - 1] : available[0];
+        if (target) target.focus();
       }
       function close(focusTrigger) {
         menu.classList.remove('open');
@@ -990,6 +1095,13 @@
         e.stopPropagation();
         if (isOpen()) close(false);
         else open();
+      });
+      // APG menu-button pattern: ArrowDown/ArrowUp on the trigger opens the menu.
+      btn.addEventListener('keydown', function (e) {
+        if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          if (!isOpen()) open(e.key === 'ArrowUp');
+        }
       });
       document.addEventListener('click', function (e) {
         if (!menu.contains(e.target) && e.target !== btn) close(false);
@@ -1026,7 +1138,7 @@
 
       function runExport(format) {
         var base = diagramFilename();
-        close(false);
+        close(true);
         return (format === 'svg'
           ? Promise.resolve(serializeSvg(1, { autoTheme: true })).then(function (d) {
               download(new Blob([d.svgString], { type: 'image/svg+xml;charset=utf-8' }), base + '.svg');
@@ -1041,14 +1153,25 @@
       }
 
       function runCopy() {
-        close(false);
+        close(true);
         if (!canCopyImage()) {
           alert('Clipboard image write not supported in this browser.');
           return;
         }
-        return rasterize('png').then(function (blob) {
-          return navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-        }).then(function () {
+        // WebKit requires ClipboardItem to be constructed synchronously inside
+        // the user gesture — pass the pending Promise<Blob> as the item value.
+        // Browsers that reject promise values throw synchronously; fall back
+        // to awaiting the blob first (works in Chromium/Firefox).
+        var blobPromise = rasterize('png');
+        var writePromise;
+        try {
+          writePromise = navigator.clipboard.write([new ClipboardItem({ 'image/png': blobPromise })]);
+        } catch (_) {
+          writePromise = blobPromise.then(function (blob) {
+            return navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+          });
+        }
+        return writePromise.then(function () {
           toast('Copied PNG to clipboard');
         }).catch(function (err) {
           console.error(err);

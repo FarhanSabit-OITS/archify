@@ -1,20 +1,29 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { esc, renderDefinitions, renderCards, applyTemplate } from '../shared/utils.mjs';
-import { validateSchema } from '../shared/validator.mjs';
+import { esc, renderDefinitions, textUnits } from '../shared/utils.mjs';
+import { loadDiagram, writeDiagram, svgRootAttrs } from '../shared/cli.mjs';
+import {
+  asArray,
+  isFinitePoint,
+  rectsOverlap,
+  anchor,
+  defaultFromSide,
+  defaultToSide,
+  chosenSide,
+  roundedPath,
+  labelPoint,
+  arrowClassMap,
+  variantAccent
+} from '../shared/geometry.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const skillRoot = path.resolve(__dirname, '../..');
-const inputPath = path.resolve(process.argv[2] || path.join(skillRoot, 'examples/agent-run.lifecycle.json'));
-const lifecycle = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
-validateSchema('lifecycle', lifecycle);
+const { diagram: lifecycle, template, outPath } = loadDiagram({
+  rendererDir: __dirname,
+  diagramType: 'lifecycle',
+  defaultExample: 'agent-run.lifecycle.json'
+});
 
-const templatePath = path.join(skillRoot, 'assets/template.html');
-const template = fs.readFileSync(templatePath, 'utf8');
-const outPath = path.resolve(process.cwd(), process.argv[3] || lifecycle.meta.output || 'lifecycle.html');
-
-const viewBox = lifecycle.meta.viewBox || [980, 660];
+const viewBox = lifecycle.meta?.viewBox || [980, 660];
 const layout = {
   phaseY: 126,
   eventY: 278,
@@ -52,20 +61,22 @@ const textClass = {
   external: 't-muted'
 };
 
-const arrowClass = {
-  default: ['a-default', 'arrowhead'],
-  emphasis: ['a-emphasis', 'arrowhead-emphasis'],
-  security: ['a-security', 'arrowhead-security'],
-  dashed: ['a-dashed', 'arrowhead-dashed']
-};
-
 function legendY() {
-  return 562;
+  return viewBox[1] - 98;
+}
+
+// Lane semantics are fixed: lane id "main" maps to the top phase band, lane id
+// "terminal" maps to the bottom outcome band, and every other lane shares the
+// middle event band (separated visually via yOffset).
+function bandFor(lane) {
+  if (lane === 'main') return 'phase';
+  if (lane === 'terminal') return 'outcome';
+  return 'event';
 }
 
 function measureState(state) {
-  const isPhase = state.lane === 'main';
-  const isOutcome = state.lane === 'terminal';
+  const isPhase = bandFor(state.lane) === 'phase';
+  const isOutcome = bandFor(state.lane) === 'outcome';
   const width = state.width || (isPhase ? layout.phaseW : isOutcome ? layout.outcomeW : layout.eventW);
   const height = state.height || (isPhase ? layout.phaseH : isOutcome ? layout.outcomeH : layout.eventH);
   const xs = isPhase ? layout.phaseXs : isOutcome ? layout.outcomeXs : layout.eventXs;
@@ -86,16 +97,7 @@ function measureState(state) {
   };
 }
 
-const states = new Map((lifecycle.states || []).map((state) => [state.id, measureState(state)]));
-
-function rectsOverlap(a, b, gap = 0) {
-  return !(
-    a.x + a.width + gap <= b.x ||
-    b.x + b.width + gap <= a.x ||
-    a.y + a.height + gap <= b.y ||
-    b.y + b.height + gap <= a.y
-  );
-}
+const states = new Map(asArray(lifecycle.states).map((state) => [state.id, measureState(state)]));
 
 function validateLifecycle() {
   const problems = [];
@@ -105,87 +107,101 @@ function validateLifecycle() {
   if (!Array.isArray(lifecycle.lanes) || lifecycle.lanes.length < 1) problems.push('Lifecycle diagrams need at least one lane.');
   if (!Array.isArray(lifecycle.states) || lifecycle.states.length < 2) problems.push('Lifecycle diagrams need at least two states.');
   if (!Array.isArray(lifecycle.transitions)) problems.push('Lifecycle diagrams must include a transitions array.');
-  if (states.size !== (lifecycle.states || []).length) problems.push('State ids must be unique.');
+  if (lifecycle.cards !== undefined && !Array.isArray(lifecycle.cards)) problems.push('Lifecycle "cards" must be an array.');
+  if (states.size !== asArray(lifecycle.states).length) problems.push('State ids must be unique.');
 
-  const laneIds = new Set((lifecycle.lanes || []).map((lane) => lane.id));
-  if (laneIds.size !== (lifecycle.lanes || []).length) problems.push('Lane ids must be unique.');
+  // The three bands are fixed at y=112/264/436; the legend (viewBox[1] - 98)
+  // must clear the outcome band's header zone.
+  if (legendY() - 20 < 448) {
+    problems.push(`viewBox height ${viewBox[1]} is too short for the fixed band layout — set meta.viewBox[1] to at least 566.`);
+  }
+
+  const laneIds = new Set(asArray(lifecycle.lanes).map((lane) => lane.id));
+  if (laneIds.size !== asArray(lifecycle.lanes).length) problems.push('Lane ids must be unique.');
+  if (!laneIds.has('main')) {
+    problems.push('Lifecycle diagrams need a lane with id "main" (the phase rail). Lane ids "main" and "terminal" are reserved: "main" maps to the top phase band, "terminal" to the bottom outcome band, and all other lanes share the middle event band.');
+  }
 
   for (const state of states.values()) {
     if (!laneIds.has(state.lane)) {
       problems.push(`State "${state.id}" uses unknown lane "${state.lane}".`);
       continue;
     }
-    const maxCol = state.lane === 'main'
+    const band = bandFor(state.lane);
+    const maxCol = band === 'phase'
       ? layout.phaseXs.length
-      : state.lane === 'terminal'
+      : band === 'outcome'
         ? layout.outcomeXs.length
         : layout.eventXs.length;
-    if (typeof state.col !== 'number' || state.col < 0 || state.col >= maxCol) {
-      problems.push(`State "${state.id}" uses invalid column ${state.col}.`);
+    if (!Number.isInteger(state.col) || state.col < 0 || state.col >= maxCol) {
+      problems.push(`State "${state.id}" uses invalid column ${state.col} — the ${band} band has integer columns 0..${maxCol - 1}.`);
+      continue;
+    }
+    if (!isFinitePoint(state.x, state.y, state.cx, state.cy)) {
+      problems.push(`State "${state.id}" produced non-finite coordinates — check col, width, height, and yOffset are numbers.`);
+      continue;
     }
     if (state.x < 32 || state.x + state.width > viewBox[0] - 32) {
-      problems.push(`State "${state.id}" exceeds the horizontal bounds of the diagram.`);
+      problems.push(`State "${state.id}" exceeds the horizontal bounds of the diagram — reduce state.width or increase meta.viewBox[0].`);
     }
     if (state.y < 64 || state.y + state.height > legendY() - 24) {
-      problems.push(`State "${state.id}" exceeds the vertical lifecycle area.`);
+      problems.push(`State "${state.id}" exceeds the vertical lifecycle area — keep y between 64 and ${legendY() - 24} (adjust yOffset or increase meta.viewBox[1]).`);
+    }
+    const estLabelW = textUnits(state.label) * 6.2;
+    if (estLabelW > state.width + 6) {
+      problems.push(`Label "${state.label}" (~${Math.round(estLabelW)}px) is wider than state "${state.id}" (${state.width}px) — shorten the label, move detail to sublabel, or increase state.width.`);
     }
   }
 
-  const byLane = new Map();
-  for (const state of states.values()) {
-    byLane.set(state.lane, [...(byLane.get(state.lane) || []), state]);
-  }
-  for (const [lane, laneStates] of byLane) {
-    for (let i = 0; i < laneStates.length; i += 1) {
-      for (let j = i + 1; j < laneStates.length; j += 1) {
-        if (rectsOverlap(laneStates[i], laneStates[j], 10)) {
-          problems.push(`States "${laneStates[i].id}" and "${laneStates[j].id}" are too close in lane "${lane}".`);
-        }
+  // All non-main/non-terminal lanes share the same y band, so the overlap
+  // check must run across lanes — not per-lane.
+  const allStates = [...states.values()];
+  for (let i = 0; i < allStates.length; i += 1) {
+    for (let j = i + 1; j < allStates.length; j += 1) {
+      if (rectsOverlap(allStates[i], allStates[j], 10)) {
+        problems.push(`States "${allStates[i].id}" and "${allStates[j].id}" are less than 10px apart — move one to another col or separate them with yOffset (lanes other than "main"/"terminal" share one band).`);
       }
     }
   }
 
-  for (const transition of lifecycle.transitions || []) {
+  for (const transition of asArray(lifecycle.transitions)) {
     if (!states.has(transition.from)) problems.push(`Transition "${transition.label || transition.from}" references unknown source "${transition.from}".`);
     if (!states.has(transition.to)) problems.push(`Transition "${transition.label || transition.to}" references unknown target "${transition.to}".`);
     if (states.has(transition.from) && states.has(transition.to)) {
       const routed = pathFor(transition);
       const [start, end] = [routed.points[0], routed.points[routed.points.length - 1]];
       const distance = Math.hypot(end[0] - start[0], end[1] - start[1]);
-      if (distance < 32) problems.push(`Transition "${transition.label || `${transition.from}->${transition.to}`}" is too short.`);
+      if (distance < 32) problems.push(`Transition "${transition.label || `${transition.from}->${transition.to}`}" is too short (${Math.round(distance)}px; minimum 32px) — route it through a channel or drop its label.`);
     }
   }
 
-  if (legendY() + 18 > viewBox[1]) problems.push(`Legend exceeds viewBox height ${viewBox[1]}.`);
+  const labelRects = [];
+  for (const transition of asArray(lifecycle.transitions)) {
+    if (!transition.label || !states.has(transition.from) || !states.has(transition.to)) continue;
+    const [lx, ly] = labelPoint(transition, pathFor(transition).points);
+    const longestLine = Math.max(textUnits(transition.label), textUnits(transition.note || ''));
+    const width = Math.max(32, longestLine * 4.9 + 12);
+    const height = transition.note ? 27 : 16;
+    labelRects.push({ label: transition.label, x: lx - width / 2, y: ly - 11, width, height });
+  }
+  for (const rect of labelRects) {
+    for (const state of states.values()) {
+      if (rectsOverlap(rect, state, -2)) {
+        problems.push(`Label "${rect.label}" overlaps state "${state.id}" — adjust labelDx/labelDy/labelSegment or set labelAt.`);
+      }
+    }
+  }
+  for (let i = 0; i < labelRects.length; i += 1) {
+    for (let j = i + 1; j < labelRects.length; j += 1) {
+      if (rectsOverlap(labelRects[i], labelRects[j], -2)) {
+        problems.push(`Labels "${labelRects[i].label}" and "${labelRects[j].label}" overlap — adjust labelDx/labelDy.`);
+      }
+    }
+  }
 
   if (problems.length) {
     throw new Error(`Lifecycle layout validation failed:\n- ${problems.join('\n- ')}`);
   }
-}
-
-function anchor(state, side) {
-  switch (side || 'auto') {
-    case 'left': return [state.x, state.cy];
-    case 'right': return [state.x + state.width, state.cy];
-    case 'top': return [state.cx, state.y];
-    case 'bottom': return [state.cx, state.y + state.height];
-    default:
-      return [state.x + state.width, state.cy];
-  }
-}
-
-function defaultFromSide(from, to) {
-  if (to.cx < from.cx) return 'left';
-  if (to.cx > from.cx) return 'right';
-  if (to.cy > from.cy) return 'bottom';
-  return 'top';
-}
-
-function defaultToSide(from, to) {
-  if (to.cx < from.cx) return 'right';
-  if (to.cx > from.cx) return 'left';
-  if (to.cy > from.cy) return 'top';
-  return 'bottom';
 }
 
 function routeVia(transition, from, to, start, end) {
@@ -194,98 +210,72 @@ function routeVia(transition, from, to, start, end) {
     case 'straight':
       return [];
     case 'drop': {
-      const y = transition.channelY || (start[1] + end[1]) / 2;
-      return [[start[0], y], [end[0], y]];
-    }
-    case 'raise': {
-      const y = transition.channelY || (start[1] + end[1]) / 2;
+      const y = transition.channelY ?? (start[1] + end[1]) / 2;
       return [[start[0], y], [end[0], y]];
     }
     case 'bottom-channel': {
-      const y = transition.channelY || Math.max(from.y + from.height, to.y + to.height) + 34;
+      const y = transition.channelY ?? Math.max(from.y + from.height, to.y + to.height) + 34;
       return [[start[0], y], [end[0], y]];
     }
     case 'top-channel': {
-      const y = transition.channelY || Math.min(from.y, to.y) - 28;
+      const y = transition.channelY ?? Math.min(from.y, to.y) - 28;
       return [[start[0], y], [end[0], y]];
     }
     case 'right-channel': {
-      const x = transition.channelX || Math.max(from.x + from.width, to.x + to.width) + 36;
+      const x = transition.channelX ?? Math.max(from.x + from.width, to.x + to.width) + 36;
       return [[x, start[1]], [x, end[1]]];
     }
     case 'left-channel': {
-      const x = transition.channelX || Math.min(from.x, to.x) - 36;
+      const x = transition.channelX ?? Math.min(from.x, to.x) - 36;
       return [[x, start[1]], [x, end[1]]];
     }
     case 'auto':
     default: {
       if (from.lane === to.lane) return [];
-      const y = transition.channelY || (start[1] + end[1]) / 2;
+      const y = transition.channelY ?? (start[1] + end[1]) / 2;
       return [[start[0], y], [end[0], y]];
     }
   }
 }
 
+const pathCache = new Map();
+
 function pathFor(transition) {
+  if (pathCache.has(transition)) return pathCache.get(transition);
   const from = states.get(transition.from);
   const to = states.get(transition.to);
-  const start = anchor(from, transition.fromSide || defaultFromSide(from, to));
-  const end = anchor(to, transition.toSide || defaultToSide(from, to));
+  const start = anchor(from, chosenSide(transition.fromSide, defaultFromSide(from, to)));
+  const end = anchor(to, chosenSide(transition.toSide, defaultToSide(from, to)));
   const points = [start, ...routeVia(transition, from, to, start, end), end];
-  return {
+  const routed = {
     d: roundedPath(points, transition.cornerRadius ?? 10),
     points
   };
+  pathCache.set(transition, routed);
+  return routed;
 }
 
-function roundedPath(points, radius) {
-  if (points.length < 3 || radius <= 0) {
-    return points.map(([x, y], index) => `${index === 0 ? 'M' : 'L'} ${x} ${y}`).join(' ');
-  }
-
-  const commands = [`M ${points[0][0]} ${points[0][1]}`];
-  for (let i = 1; i < points.length - 1; i += 1) {
-    const [px, py] = points[i - 1];
-    const [cx, cy] = points[i];
-    const [nx, ny] = points[i + 1];
-    const prevLen = Math.hypot(cx - px, cy - py);
-    const nextLen = Math.hypot(nx - cx, ny - cy);
-    const r = Math.min(radius, prevLen / 2, nextLen / 2);
-    if (r < 1) {
-      commands.push(`L ${cx} ${cy}`);
-      continue;
-    }
-    const before = [cx - ((cx - px) / prevLen) * r, cy - ((cy - py) / prevLen) * r];
-    const after = [cx + ((nx - cx) / nextLen) * r, cy + ((ny - cy) / nextLen) * r];
-    commands.push(`L ${before[0]} ${before[1]}`);
-    commands.push(`Q ${cx} ${cy} ${after[0]} ${after[1]}`);
-  }
-  const [endX, endY] = points[points.length - 1];
-  commands.push(`L ${endX} ${endY}`);
-  return commands.join(' ');
-}
-
-function labelPoint(transition, points) {
-  if (transition.labelAt) return transition.labelAt;
-  if (points.length === 2) {
-    return [
-      (points[0][0] + points[1][0]) / 2 + (transition.labelDx || 0),
-      points[0][1] - 10 + (transition.labelDy || 0)
-    ];
-  }
-  const segmentIndex = Math.min(points.length - 2, Math.max(0, transition.labelSegment ?? 1));
-  const a = points[segmentIndex];
-  const b = points[segmentIndex + 1];
-  return [(a[0] + b[0]) / 2 + (transition.labelDx || 0), (a[1] + b[1]) / 2 - 10 + (transition.labelDy || 0)];
+function bandTitles() {
+  const lanes = asArray(lifecycle.lanes);
+  const mainLane = lanes.find((lane) => lane.id === 'main');
+  const terminalLane = lanes.find((lane) => lane.id === 'terminal');
+  const eventLanes = lanes.filter((lane) => lane.id !== 'main' && lane.id !== 'terminal');
+  return [
+    mainLane?.label || 'Lifecycle phases',
+    eventLanes.length ? eventLanes.map((lane) => lane.label).join(' + ') : 'Interruptions + recovery',
+    terminalLane?.label || 'Outcomes'
+  ];
 }
 
 function renderBands() {
-  return `        <path d="M 72 112 L 908 112" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
-        <text x="72" y="100" class="t-dim" font-size="10" font-weight="600">01 / Lifecycle phases</text>
-        <path d="M 72 264 L 908 264" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
-        <text x="72" y="252" class="t-dim" font-size="10" font-weight="600">02 / Interruptions + recovery</text>
-        <path d="M 72 436 L 908 436" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
-        <text x="72" y="424" class="t-dim" font-size="10" font-weight="600">03 / Outcomes</text>`;
+  const right = viewBox[0] - 72;
+  const titles = bandTitles();
+  return `        <path d="M 72 112 L ${right} 112" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
+        <text x="72" y="100" class="t-dim" font-size="10" font-weight="600">01 / ${esc(titles[0])}</text>
+        <path d="M 72 264 L ${right} 264" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
+        <text x="72" y="252" class="t-dim" font-size="10" font-weight="600">02 / ${esc(titles[1])}</text>
+        <path d="M 72 436 L ${right} 436" class="a-default" stroke-width="0.8" stroke-dasharray="3,8"/>
+        <text x="72" y="424" class="t-dim" font-size="10" font-weight="600">03 / ${esc(titles[2])}</text>`;
 }
 
 function renderState(state) {
@@ -303,18 +293,8 @@ function renderState(state) {
         <text x="${state.cx}" y="${state.y + 37}" class="t-muted" font-size="7" text-anchor="middle">${esc(state.sublabel || '')}</text>${tag}`;
 }
 
-function transitionAccent(transition) {
-  return transition.variant === 'security'
-    ? 't-security'
-    : transition.variant === 'emphasis'
-      ? 't-backend'
-      : transition.variant === 'dashed'
-        ? 't-messagebus'
-        : 't-muted';
-}
-
 function renderTransitionPath(transition) {
-  const [cls, marker] = arrowClass[transition.variant || 'default'] || arrowClass.default;
+  const [cls, marker] = arrowClassMap[transition.variant || 'default'] || arrowClassMap.default;
   const routed = pathFor(transition);
   const strokeWidth = transition.width || (transition.variant === 'emphasis' ? 2 : 1.1);
   return `        <path d="${routed.d}" class="${cls}" stroke-width="${strokeWidth}" marker-end="url(#${marker})"/>`;
@@ -324,14 +304,14 @@ function renderTransitionLabel(transition) {
   if (!transition.label) return '';
   const routed = pathFor(transition);
   const [lx, ly] = labelPoint(transition, routed.points);
-  const longestLine = Math.max(transition.label.length, (transition.note || '').length);
+  const longestLine = Math.max(textUnits(transition.label), textUnits(transition.note || ''));
   const labelW = Math.max(32, longestLine * 4.9 + 12);
   const labelH = transition.note ? 27 : 16;
   const note = transition.note
     ? `\n        <text x="${lx}" y="${ly + 11}" class="t-dim" font-size="7" text-anchor="middle">${esc(transition.note)}</text>`
     : '';
   return `        <rect x="${lx - labelW / 2}" y="${ly - 11}" width="${labelW}" height="${labelH}" rx="4" class="c-mask"/>
-        <text x="${lx}" y="${ly}" class="${transitionAccent(transition)}" font-size="8" text-anchor="middle">${esc(transition.label)}</text>${note}`;
+        <text x="${lx}" y="${ly}" class="${variantAccent(transition.variant)}" font-size="8" text-anchor="middle">${esc(transition.label)}</text>${note}`;
 }
 
 function renderLegend() {
@@ -348,11 +328,16 @@ function renderLegend() {
 }
 
 function renderLifecycleRail() {
-  return `        <path d="M 154 ${layout.phaseY + 31} L 748 ${layout.phaseY + 31}" class="a-emphasis" stroke-width="2.2" marker-end="url(#arrowhead-emphasis)"/>`;
+  const mainCols = [...states.values()]
+    .filter((state) => bandFor(state.lane) === 'phase')
+    .map((state) => state.col);
+  if (!mainCols.length) return '';
+  const railEnd = layout.phaseXs[Math.max(...mainCols)] + 38;
+  return `        <path d="M 154 ${layout.phaseY + 31} L ${railEnd} ${layout.phaseY + 31}" class="a-emphasis" stroke-width="2.2" marker-end="url(#arrowhead-emphasis)"/>`;
 }
 
 function renderSvg() {
-  return `      <svg viewBox="0 0 ${viewBox[0]} ${viewBox[1]}">
+  return `      <svg viewBox="0 0 ${viewBox[0]} ${viewBox[1]}" ${svgRootAttrs(lifecycle.meta, 'lifecycle diagram')}>
 ${renderDefinitions()}
 
         <!-- Background Grid -->
@@ -365,13 +350,13 @@ ${renderBands()}
 ${renderLifecycleRail()}
 
         <!-- Transition paths -->
-${(lifecycle.transitions || []).map(renderTransitionPath).join('\n')}
+${asArray(lifecycle.transitions).map(renderTransitionPath).join('\n')}
 
         <!-- States -->
 ${[...states.values()].map(renderState).join('\n\n')}
 
         <!-- Transition labels -->
-${(lifecycle.transitions || []).map(renderTransitionLabel).join('\n')}
+${asArray(lifecycle.transitions).map(renderTransitionLabel).join('\n')}
 
         <!-- Legend -->
 ${renderLegend()}
@@ -379,12 +364,11 @@ ${renderLegend()}
 }
 
 validateLifecycle();
-fs.mkdirSync(path.dirname(outPath), { recursive: true });
-fs.writeFileSync(outPath, applyTemplate(template, {
-  title: lifecycle.meta.title,
-  subtitle: lifecycle.meta.subtitle,
-  footer: 'Lifecycle diagram &bull; Built with Archify &bull; Press <kbd>T</kbd> for theme and <kbd>E</kbd> for export',
+writeDiagram({
+  outPath,
+  template,
+  meta: lifecycle.meta,
+  footerLabel: 'Lifecycle diagram',
   svg: renderSvg(),
-  cards: renderCards(lifecycle.cards),
-}));
-console.log(outPath);
+  cards: lifecycle.cards,
+});

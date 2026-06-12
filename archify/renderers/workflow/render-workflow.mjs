@@ -1,22 +1,30 @@
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { esc, renderDefinitions, renderCards, applyTemplate } from '../shared/utils.mjs';
-import { validateSchema } from '../shared/validator.mjs';
+import { esc, renderDefinitions, textUnits } from '../shared/utils.mjs';
+import { loadDiagram, writeDiagram, svgRootAttrs } from '../shared/cli.mjs';
+import {
+  asArray,
+  isFinitePoint,
+  rectsOverlap,
+  anchor,
+  defaultFromSide,
+  defaultToSide,
+  chosenSide,
+  polylinePath,
+  labelPoint,
+  componentFill,
+  componentText,
+  arrowClassMap,
+  variantAccent
+} from '../shared/geometry.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const skillRoot = path.resolve(__dirname, '../..');
-const repoRoot = path.resolve(skillRoot, '..');
-const inputPath = path.resolve(process.argv[2] || path.join(skillRoot, 'examples/agent-tool-call.workflow.json'));
-const workflow = JSON.parse(fs.readFileSync(inputPath, 'utf8'));
-validateSchema('workflow', workflow);
+const { diagram: workflow, template, outPath } = loadDiagram({
+  rendererDir: __dirname,
+  diagramType: 'workflow',
+  defaultExample: 'agent-tool-call.workflow.json'
+});
 
-const templatePath = path.join(skillRoot, 'assets/template.html');
-const template = fs.readFileSync(templatePath, 'utf8');
-
-const outPath = path.resolve(process.cwd(), process.argv[3] || workflow.meta.output || 'workflow.html');
-
-const viewBox = workflow.meta.viewBox || [1000, 720];
 const layout = {
   laneX: 40,
   laneY: 52,
@@ -29,34 +37,14 @@ const layout = {
   nodeH: 52
 };
 
-const typeClass = {
-  frontend: 'c-frontend',
-  backend: 'c-backend',
-  database: 'c-database',
-  cloud: 'c-cloud',
-  security: 'c-security',
-  messagebus: 'c-messagebus',
-  external: 'c-external'
-};
+// Content is 680px wide (laneX + laneW); auto height fits the lanes plus legend.
+const autoHeight = layout.laneY
+  + (workflow.lanes?.length || 1) * layout.laneH
+  + ((workflow.lanes?.length || 1) - 1) * layout.laneGap
+  + 124;
+const viewBox = workflow.meta?.viewBox || [720, autoHeight];
 
-const textClass = {
-  frontend: 't-frontend',
-  backend: 't-backend',
-  database: 't-database',
-  cloud: 't-cloud',
-  security: 't-security',
-  messagebus: 't-messagebus',
-  external: 't-external'
-};
-
-const arrowClass = {
-  default: ['a-default', 'arrowhead'],
-  emphasis: ['a-emphasis', 'arrowhead-emphasis'],
-  security: ['a-security', 'arrowhead-security'],
-  dashed: ['a-dashed', 'arrowhead-dashed']
-};
-
-const laneIndex = new Map(workflow.lanes.map((lane, index) => [lane.id, index]));
+const laneIndex = new Map(asArray(workflow.lanes).map((lane, index) => [lane.id, index]));
 
 function laneTop(id) {
   return layout.laneY + laneIndex.get(id) * (layout.laneH + layout.laneGap);
@@ -87,23 +75,14 @@ function measureNode(node) {
   };
 }
 
-const nodes = new Map(workflow.nodes.map((node) => [node.id, measureNode(node)]));
-
-function rectsOverlap(a, b, gap = 0) {
-  return !(
-    a.x + a.width + gap <= b.x ||
-    b.x + b.width + gap <= a.x ||
-    a.y + a.height + gap <= b.y ||
-    b.y + b.height + gap <= a.y
-  );
-}
+const nodes = new Map(asArray(workflow.nodes).map((node) => [node.id, measureNode(node)]));
 
 function validateWorkflow() {
   const problems = [];
   if (workflow.schema_version !== 1) {
     problems.push('Workflow files must set "schema_version": 1.');
   }
-  if (workflow.diagram_type && workflow.diagram_type !== 'workflow') {
+  if (workflow.diagram_type !== 'workflow') {
     problems.push(`Unsupported diagram_type "${workflow.diagram_type}". Expected "workflow".`);
   }
   if (!workflow.meta || !workflow.meta.title) {
@@ -117,6 +96,9 @@ function validateWorkflow() {
   }
   if (!Array.isArray(workflow.edges)) {
     problems.push('Workflow files must include an edges array.');
+  }
+  if (workflow.cards !== undefined && !Array.isArray(workflow.cards)) {
+    problems.push('Workflow "cards" must be an array.');
   }
   if (problems.length) {
     throw new Error(`Workflow layout validation failed:\n- ${problems.join('\n- ')}`);
@@ -135,8 +117,17 @@ function validateWorkflow() {
       problems.push(`Node "${node.id}" uses unknown lane "${node.lane}".`);
       continue;
     }
-    if (node.col < 0 || node.col >= layout.colXs.length) {
-      problems.push(`Node "${node.id}" uses column ${node.col}, but only ${layout.colXs.length} columns exist.`);
+    if (!Number.isInteger(node.col) || node.col < 0 || node.col >= layout.colXs.length) {
+      problems.push(`Node "${node.id}" uses column ${node.col}, but valid columns are integers 0..${layout.colXs.length - 1}.`);
+      continue;
+    }
+    if (!isFinitePoint(node.x, node.y, node.cx, node.cy)) {
+      problems.push(`Node "${node.id}" produced non-finite coordinates — check col, width, height, and yOffset are numbers.`);
+      continue;
+    }
+    const estLabelW = textUnits(node.label) * 6.8;
+    if (estLabelW > node.width + 6) {
+      problems.push(`Label "${node.label}" (~${Math.round(estLabelW)}px) is wider than node "${node.id}" (${node.width}px) — shorten the label, move detail to sublabel, or increase node.width.`);
     }
 
     const top = laneTop(node.lane);
@@ -158,7 +149,7 @@ function validateWorkflow() {
     for (let i = 0; i < laneNodes.length; i += 1) {
       for (let j = i + 1; j < laneNodes.length; j += 1) {
         if (rectsOverlap(laneNodes[i], laneNodes[j], 8)) {
-          problems.push(`Nodes "${laneNodes[i].id}" and "${laneNodes[j].id}" are too close in lane "${lane}".`);
+          problems.push(`Nodes "${laneNodes[i].id}" and "${laneNodes[j].id}" are less than 8px apart in lane "${lane}" — move one to another col, adjust yOffset, or reduce width/height.`);
         }
       }
     }
@@ -173,56 +164,44 @@ function validateWorkflow() {
         const [start, end] = routed.points;
         const segmentLength = Math.hypot(end[0] - start[0], end[1] - start[1]);
         if (segmentLength < 28) {
-          problems.push(`Edge "${edge.from}" -> "${edge.to}" is too short (${Math.round(segmentLength)}px).`);
+          problems.push(`Edge "${edge.from}" -> "${edge.to}" is too short (${Math.round(segmentLength)}px; minimum 28px) — drop its label or route it through a channel.`);
         }
       }
     }
   }
 
+  const labelRects = [];
+  for (const edge of workflow.edges) {
+    if (!edge.label || !nodes.has(edge.from) || !nodes.has(edge.to)) continue;
+    const [lx, ly] = labelPoint(edge, pathFor(edge).points);
+    const width = Math.max(30, textUnits(edge.label) * 4.8 + 10);
+    labelRects.push({ label: edge.label, x: lx - width / 2, y: ly - 10, width, height: 14 });
+  }
+  for (const rect of labelRects) {
+    for (const node of nodes.values()) {
+      if (rectsOverlap(rect, node, -2)) {
+        problems.push(`Label "${rect.label}" overlaps node "${node.id}" — adjust labelDx/labelDy/labelSegment or set labelAt.`);
+      }
+    }
+  }
+  for (let i = 0; i < labelRects.length; i += 1) {
+    for (let j = i + 1; j < labelRects.length; j += 1) {
+      if (rectsOverlap(labelRects[i], labelRects[j], -2)) {
+        problems.push(`Labels "${labelRects[i].label}" and "${labelRects[j].label}" overlap — adjust labelDx/labelDy or remove one label.`);
+      }
+    }
+  }
+
+  if (viewBox[0] < layout.laneX + layout.laneW + 16) {
+    problems.push(`viewBox width ${viewBox[0]} clips the ${layout.laneW}px lanes — set meta.viewBox[0] to at least ${layout.laneX + layout.laneW + 16}.`);
+  }
   if (legendY() + 18 > viewBox[1]) {
-    problems.push(`Legend exceeds viewBox height ${viewBox[1]}.`);
+    problems.push(`Legend exceeds viewBox height ${viewBox[1]} — set meta.viewBox[1] to at least ${legendY() + 18}.`);
   }
 
   if (problems.length) {
     throw new Error(`Workflow layout validation failed:\n- ${problems.join('\n- ')}`);
   }
-}
-
-function anchor(node, side) {
-  switch (side || 'auto') {
-    case 'left': return [node.x, node.cy];
-    case 'right': return [node.x + node.width, node.cy];
-    case 'top': return [node.cx, node.y];
-    case 'bottom': return [node.cx, node.y + node.height];
-    default:
-      return [node.x + node.width, node.cy];
-  }
-}
-
-function defaultTargetSide(from, to) {
-  if (to.cx < from.cx) return 'right';
-  if (to.cx > from.cx) return 'left';
-  if (to.cy > from.cy) return 'top';
-  return 'bottom';
-}
-
-function defaultFromSide(from, to) {
-  if (to.cx < from.cx) return 'left';
-  if (to.cx > from.cx) return 'right';
-  if (to.cy > from.cy) return 'bottom';
-  return 'top';
-}
-
-function pathFor(edge) {
-  const from = nodes.get(edge.from);
-  const to = nodes.get(edge.to);
-  const start = anchor(from, edge.fromSide || defaultFromSide(from, to));
-  const end = anchor(to, edge.toSide || defaultTargetSide(from, to));
-  const points = [start, ...routeVia(edge, from, to, start, end), end];
-  return {
-    d: points.map(([x, y], index) => `${index === 0 ? 'M' : 'L'} ${x} ${y}`).join(' '),
-    points
-  };
 }
 
 function gapYBetween(fromLane, toLane, bias = 0.5) {
@@ -237,56 +216,46 @@ function routeVia(edge, from, to, start, end) {
     case 'straight':
       return [];
     case 'drop': {
-      const y = gapYBetween(from.lane, to.lane, edge.bias || 0.5);
+      const y = gapYBetween(from.lane, to.lane, edge.bias ?? 0.5);
       return [[start[0], y], [end[0], y]];
     }
-    case 'drop-right': {
-      const y = gapYBetween(from.lane, to.lane, edge.bias || 0.5);
-      return [[start[0], y], [end[0], y]];
-    }
-    case 'drop-left': {
-      const y = gapYBetween(from.lane, to.lane, edge.bias || 0.5);
-      return [[start[0], y], [end[0], y]];
-    }
-    case 'same-lane':
-      return [];
     case 'outside-right': {
-      const x = edge.channelX || layout.laneX + layout.laneW + 12;
+      const x = edge.channelX ?? layout.laneX + layout.laneW + 12;
       return [[x, start[1]], [x, end[1]]];
     }
     case 'return-left': {
-      const x = edge.channelX || Math.min(from.x, to.x) - 28;
+      const x = edge.channelX ?? Math.min(from.x, to.x) - 28;
       return [[x, start[1]], [x, end[1]]];
     }
     case 'bottom-channel': {
-      const y = edge.channelY || Math.max(from.y + from.height, to.y + to.height) + 32;
+      const y = edge.channelY ?? Math.max(from.y + from.height, to.y + to.height) + 32;
       return [[start[0], y], [end[0], y]];
     }
     case 'up-channel': {
-      const y = edge.channelY || Math.min(from.y, to.y) - 28;
+      const y = edge.channelY ?? Math.min(from.y, to.y) - 28;
       return [[start[0], y], [end[0], y]];
     }
     case 'auto':
     default: {
       if (from.lane === to.lane) return [];
-      const y = gapYBetween(from.lane, to.lane, edge.bias || 0.5);
+      const y = gapYBetween(from.lane, to.lane, edge.bias ?? 0.5);
       return [[start[0], y], [end[0], y]];
     }
   }
 }
 
-function labelPoint(edge, points) {
-  if (edge.labelAt) return edge.labelAt;
-  if (points.length === 2) {
-    return [
-      (points[0][0] + points[1][0]) / 2 + (edge.labelDx || 0),
-      points[0][1] - 10 + (edge.labelDy || 0)
-    ];
-  }
-  const segmentIndex = Math.min(points.length - 2, Math.max(0, edge.labelSegment ?? 1));
-  const a = points[segmentIndex];
-  const b = points[segmentIndex + 1];
-  return [(a[0] + b[0]) / 2 + (edge.labelDx || 0), (a[1] + b[1]) / 2 - 10 + (edge.labelDy || 0)];
+const pathCache = new Map();
+
+function pathFor(edge) {
+  if (pathCache.has(edge)) return pathCache.get(edge);
+  const from = nodes.get(edge.from);
+  const to = nodes.get(edge.to);
+  const start = anchor(from, chosenSide(edge.fromSide, defaultFromSide(from, to)));
+  const end = anchor(to, chosenSide(edge.toSide, defaultToSide(from, to)));
+  const points = [start, ...routeVia(edge, from, to, start, end), end];
+  const routed = { d: polylinePath(points), points };
+  pathCache.set(edge, routed);
+  return routed;
 }
 
 function renderLane(lane, index) {
@@ -296,8 +265,8 @@ function renderLane(lane, index) {
 }
 
 function renderNode(node) {
-  const fill = typeClass[node.type] || 'c-external';
-  const accent = textClass[node.type] || 't-muted';
+  const fill = componentFill[node.type] || 'c-external';
+  const accent = componentText[node.type] || 't-muted';
   const tag = node.tag
     ? `\n        <text x="${node.cx}" y="${node.y + node.height - 12}" class="${accent}" font-size="7" text-anchor="middle">${esc(node.tag)}</text>`
     : '';
@@ -307,18 +276,8 @@ function renderNode(node) {
         <text x="${node.cx}" y="${node.y + 38}" class="t-muted" font-size="8" text-anchor="middle">${esc(node.sublabel || '')}</text>${tag}`;
 }
 
-function edgeAccent(edge) {
-  return edge.variant === 'security'
-    ? 't-security'
-    : edge.variant === 'emphasis'
-      ? 't-backend'
-      : edge.variant === 'dashed'
-        ? 't-database'
-        : 't-muted';
-}
-
 function renderEdgePath(edge) {
-  const [cls, marker] = arrowClass[edge.variant || 'default'] || arrowClass.default;
+  const [cls, marker] = arrowClassMap[edge.variant || 'default'] || arrowClassMap.default;
   const routed = pathFor(edge);
   const strokeWidth = edge.width || (edge.variant === 'emphasis' ? 1.8 : 1.4);
   return `        <path d="${routed.d}" class="${cls}" stroke-width="${strokeWidth}" marker-end="url(#${marker})"/>`;
@@ -328,9 +287,9 @@ function renderEdgeLabel(edge) {
   if (!edge.label) return '';
   const routed = pathFor(edge);
   const [lx, ly] = labelPoint(edge, routed.points);
-  const labelW = Math.max(30, edge.label.length * 4.8 + 10);
+  const labelW = Math.max(30, textUnits(edge.label) * 4.8 + 10);
   return `        <rect x="${lx - labelW / 2}" y="${ly - 10}" width="${labelW}" height="14" rx="3" class="c-mask"/>
-        <text x="${lx}" y="${ly}" class="${edgeAccent(edge)}" font-size="8" text-anchor="middle">${esc(edge.label)}</text>`;
+        <text x="${lx}" y="${ly}" class="${variantAccent(edge.variant, { dashed: 't-database' })}" font-size="8" text-anchor="middle">${esc(edge.label)}</text>`;
 }
 
 function renderLegend() {
@@ -349,7 +308,7 @@ function renderLegend() {
 }
 
 function renderSvg() {
-  return `      <svg viewBox="0 0 ${viewBox[0]} ${viewBox[1]}">
+  return `      <svg viewBox="0 0 ${viewBox[0]} ${viewBox[1]}" ${svgRootAttrs(workflow.meta, 'workflow diagram')}>
 ${renderDefinitions()}
 
         <!-- Background Grid -->
@@ -372,14 +331,12 @@ ${renderLegend()}
       </svg>`;
 }
 
-
-fs.mkdirSync(path.dirname(outPath), { recursive: true });
 validateWorkflow();
-fs.writeFileSync(outPath, applyTemplate(template, {
-  title: workflow.meta.title,
-  subtitle: workflow.meta.subtitle,
-  footer: 'Workflow diagram &bull; Built with Archify &bull; Press <kbd>T</kbd> for theme and <kbd>E</kbd> for export',
+writeDiagram({
+  outPath,
+  template,
+  meta: workflow.meta,
+  footerLabel: 'Workflow diagram',
   svg: renderSvg(),
-  cards: renderCards(workflow.cards),
-}));
-console.log(outPath);
+  cards: workflow.cards,
+});

@@ -7,6 +7,11 @@ template.
 node archify/renderers/dataflow/render-dataflow.mjs input.dataflow.json output.html
 ```
 
+Run `npm install` once in the skill folder first — the renderer validates the
+input against `archify/schemas/dataflow.schema.json` via ajv. Without it, the
+renderer prints a warning and skips schema validation; its own layout checks
+still run.
+
 If `output.html` is omitted, the renderer uses `meta.output` from the JSON file
 or falls back to `dataflow.html` in the current working directory.
 
@@ -21,7 +26,7 @@ Data-flow JSON files must set:
   "meta": {
     "title": "Product Analytics Data Flow",
     "subtitle": "Events, consent, PII isolation, warehouse sync, and consumers",
-    "viewBox": [900, 720]
+    "viewBox": [940, 720]
   },
   "stages": [],
   "nodes": [],
@@ -30,11 +35,30 @@ Data-flow JSON files must set:
 }
 ```
 
+A complete worked example lives at
+`archify/examples/product-analytics.dataflow.json`.
+
 The schema lives at:
 
 ```text
 archify/schemas/dataflow.schema.json
 ```
+
+## Layout budget
+
+| Constant | Value |
+|----------|-------|
+| viewBox | default `[940, 720]`; schema minimum `[360, 360]` |
+| Stages (2–5) | centers at x = 100 + stage×215; stage band 168 wide, header at y 46 |
+| Row tops (`row` 0–4) | y = 128, 242, 356, 470, 584 (plus `yOffset`) |
+| Default node | 112×58 |
+| Node area | x within `[24, width − 24]`; y within `[104, height − 74]` |
+| Node spacing | ≥10px between any two nodes (checked across stages and rows) |
+| Flow length | ≥34px between endpoints |
+| Legend row | y = height − 36 |
+
+Route presets for flows: `straight`, `vertical-channel`, `bottom-channel`,
+`top-channel`, explicit `via` points, or the default `auto` (midpoint elbow).
 
 ## Design Rules
 
@@ -51,7 +75,10 @@ archify/schemas/dataflow.schema.json
   derivations.
 - Keep labels short enough to fit in narrow previews.
 
-The renderer fails when it can detect layout problems, including missing stages,
-duplicate node IDs, nodes outside the readable diagram area, node overlap,
-unknown flow endpoints, missing flow labels, unreadably short flows, or stages
-that exceed the viewBox.
+Schema violations exit non-zero with path-prefixed messages annotated with the
+element's id or label. The renderer additionally fails when it can detect
+layout problems, including missing stages, duplicate node IDs, nodes outside
+the readable diagram area, node overlap, labels colliding with nodes or other
+labels, labels wider than their node, unknown flow endpoints, missing flow
+labels, unreadably short flows, or stages that exceed the viewBox. Text width
+is estimated CJK-aware: fullwidth glyphs count as two units.

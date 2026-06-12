@@ -31,11 +31,11 @@
     { "from": "chat", "to": "planner", "label": "plan", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1 },
     { "from": "planner", "to": "router", "variant": "default" },
     { "from": "router", "to": "approval", "label": "needs approval?", "variant": "security", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 0, "labelDx": 34, "labelDy": 18 },
-    { "from": "approval", "to": "tool", "label": "approved", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop-right", "labelSegment": 1, "labelDy": 14 },
+    { "from": "approval", "to": "tool", "label": "approved", "variant": "emphasis", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1, "labelDy": 14 },
     { "from": "tool", "to": "external", "variant": "default" },
     { "from": "external", "to": "trace", "label": "record result", "variant": "dashed", "fromSide": "bottom", "toSide": "bottom", "route": "bottom-channel", "labelSegment": 1 },
     { "from": "trace", "to": "final", "label": "summarize outcome", "variant": "emphasis", "fromSide": "right", "toSide": "right", "route": "outside-right", "labelSegment": 1, "labelDx": -22 },
-    { "from": "planner", "to": "store", "label": "load context", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "route": "drop-left", "labelSegment": 1 },
+    { "from": "planner", "to": "store", "label": "load context", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "route": "drop", "labelSegment": 1 },
     { "from": "store", "to": "trace", "label": "write trace + memory", "variant": "dashed", "labelAt": [380, 622] }
   ],
   "cards": [

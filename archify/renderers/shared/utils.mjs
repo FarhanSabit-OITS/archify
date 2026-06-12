@@ -26,7 +26,7 @@ export function renderDefinitions() {
 }
 
 export function renderCards(cards) {
-  const list = cards || [];
+  const list = Array.isArray(cards) ? cards : [];
   return `    <!-- Info Cards -->
     <div class="cards">
 ${list.map((card) => `      <div class="card">
@@ -65,11 +65,24 @@ export function applyTemplate(template, { title, subtitle, footer, svg, cards })
       throw new Error(`applyTemplate: template missing placeholder ${JSON.stringify(ph)}`);
     }
   }
+  // Function replacers: a literal `$&`, `$'`, `$\`` or `$$` in titles, labels,
+  // or rendered SVG must not be interpreted as a replacement pattern.
   return template
-    .replace(TEMPLATE_PLACEHOLDERS[0], `<title>${esc(title)} Diagram</title>`)
-    .replace(TEMPLATE_PLACEHOLDERS[1], `<h1>${esc(title)}</h1>`)
-    .replace(TEMPLATE_PLACEHOLDERS[2], `<p class="subtitle">${esc(subtitle ?? '')}</p>`)
-    .replace(SVG_SLOT_RE, svg)
-    .replace(CARDS_SLOT_RE, cards)
-    .replace(TEMPLATE_PLACEHOLDERS[3], footer);
+    .replace(TEMPLATE_PLACEHOLDERS[0], () => `<title>${esc(title)} Diagram</title>`)
+    .replace(TEMPLATE_PLACEHOLDERS[1], () => `<h1>${esc(title)}</h1>`)
+    .replace(TEMPLATE_PLACEHOLDERS[2], () => `<p class="subtitle">${esc(subtitle ?? '')}</p>`)
+    .replace(SVG_SLOT_RE, () => svg)
+    .replace(CARDS_SLOT_RE, () => cards)
+    .replace(TEMPLATE_PLACEHOLDERS[3], () => footer);
+}
+
+// CJK and other fullwidth glyphs render at roughly twice the advance width of
+// ASCII in the monospace stacks the template uses. Includes the supplementary
+// CJK extensions and emoji, which also render double-width.
+const FULLWIDTH_RE = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦　-〿\u{1F000}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u;
+
+export function textUnits(text) {
+  let units = 0;
+  for (const ch of String(text ?? '')) units += FULLWIDTH_RE.test(ch) ? 2 : 1;
+  return units;
 }
